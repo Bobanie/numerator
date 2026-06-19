@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="ru">
 <head>
 <meta charset="UTF-8">
@@ -102,7 +102,11 @@
   .eraser { position: absolute; background: #ffffff; pointer-events: none; }
   body.erase-mode .eraser { outline: 1px dashed #b00020; }
   body.erase-mode #stage { cursor: cell; }
+  body.smart-erase-mode .eraser { outline: 1px dashed #2d6cdf; }
+  body.smart-erase-mode #stage { cursor: crosshair; }
   .erase-preview { position: absolute; background: rgba(255,255,255,0.7); outline: 1px dashed #b00020; pointer-events: none; }
+  .smart-preview { position: absolute; background: rgba(45,108,223,0.25); outline: 1px dashed #2d6cdf; pointer-events: none; animation: smartPulse 0.8s ease-in-out infinite alternate; }
+  @keyframes smartPulse { from { background: rgba(45,108,223,0.15); } to { background: rgba(45,108,223,0.35); } }
   .panel {
     flex: 0 0 420px;
     background: #fff;
@@ -133,6 +137,11 @@
   <h1>Нумератор схем</h1>
   <button onclick="document.getElementById('fileInput').click()">Загрузить схему</button>
   <button id="modeBtn" onclick="toggleErase()">Ластик: выкл</button>
+  <button id="smartEraseBtn" onclick="toggleSmartErase()">Умный ластик: выкл</button>
+  <label class="fontsize-ctrl" title="Чувствительность умного ластика (чем больше, тем шире захват цвета)">Чувств.:
+    <input id="smartSensitivity" type="range" min="5" max="80" value="30" oninput="document.getElementById('smartSensVal').textContent=this.value" style="width:60px;vertical-align:middle;">
+    <span id="smartSensVal" style="font-size:11px;">30</span>
+  </label>
   <button id="markerModeBtn" onclick="toggleMarkerMode()">Режим: со сноской</button>
   <button id="rtBtn" onclick="setSpecialMode('rt')">РТ: выкл</button>
   <button id="rdBtn" onclick="setSpecialMode('rd')">РД: выкл</button>
@@ -199,7 +208,8 @@ let state = {
 };
 let selected = -1;
 let pendingFocus = -1;   // строка, в поле которой нужно сразу поставить курсор после клика
-let eraseMode = false;   // включён ли ластик
+let eraseMode = false;      // включён ли обычный ластик
+let smartEraseMode = false; // включён ли умный ластик
 let zoom = null;         // null = авто-подгонка по ширине при первой загрузке
 let markerMode = 'callout'; // 'callout' — со сноской, 'number' — только цифра
 let numberingMode = 'all'; // 'all' | 'odd' | 'even'
@@ -362,8 +372,8 @@ function render() {
 
   const img = document.createElement('img');
   img.src = state.imageData;
-  img.onclick = ev => { if (eraseMode) return; onStageClick(ev); };
-  img.onmousedown = ev => { if (eraseMode) startErase(ev); };
+  img.onclick = ev => { if (eraseMode || smartEraseMode) return; onStageClick(ev); };
+  img.onmousedown = ev => { if (eraseMode || smartEraseMode) { onStageDown(ev); } };
   img.onload = applyZoom;
   stage.appendChild(img);
 
@@ -603,6 +613,135 @@ function onEraseEnd(ev) {
   }
 }
 
+	// ===== Умный ластик: flood-fill по клику =====
+	let smartPreviewEl = null;
+
+	function toggleSmartErase() {
+	  smartEraseMode = !smartEraseMode;
+	  if (smartEraseMode && eraseMode) toggleErase();
+	  document.body.classList.toggle('smart-erase-mode', smartEraseMode);
+	  const b = document.getElementById('smartEraseBtn');
+	  b.textContent = 'Умный ластик: ' + (smartEraseMode ? 'вкл' : 'выкл');
+	  b.classList.toggle('primary', smartEraseMode);
+	}
+
+	function getSensitivity() {
+	  const s = document.getElementById('smartSensitivity');
+	  return s ? parseInt(s.value, 10) : 30;
+	}
+
+	function getImagePixelData() {
+	  const img = stage.querySelector('img');
+	  if (!img) return null;
+	  const canvas = document.createElement('canvas');
+	  canvas.width = img.naturalWidth;
+	  canvas.height = img.naturalHeight;
+	  const ctx = canvas.getContext('2d');
+	  ctx.drawImage(img, 0, 0);
+	  return { ctx, canvas, w: canvas.width, h: canvas.height };
+	}
+
+	function floodFillRegion(pixelData, startX, startY, tolerance) {
+	  const { ctx, w, h } = pixelData;
+	  const imageData = ctx.getImageData(0, 0, w, h);
+	  const pixels = imageData.data;
+	  const visited = new Uint8Array(w * h);
+	  const startIdx = (startY * w + startX) * 4;
+	  const sr = pixels[startIdx], sg = pixels[startIdx + 1], sb = pixels[startIdx + 2];
+
+	  const stack = [[startX, startY]];
+	  visited[startY * w + startX] = 1;
+	  let minX = startX, maxX = startX, minY = startY, maxY = startY;
+
+	  while (stack.length > 0) {
+	    const [px, py] = stack.pop();
+	    if (px < minX) minX = px; if (px > maxX) maxX = px;
+	    if (py < minY) minY = py; if (py > maxY) maxY = py;
+
+	    for (const [dx, dy] of [[-1,-1],[0,-1],[1,-1],[-1,0],[1,0],[-1,1],[0,1],[1,1]]) {
+	      const nx = px + dx, ny = py + dy;
+	      if (nx < 0 || nx >= w || ny < 0 || ny >= h) continue;
+	      if (visited[ny * w + nx]) continue;
+	      const idx = (ny * w + nx) * 4;
+	      const dr = Math.abs(pixels[idx] - sr);
+	      const dg = Math.abs(pixels[idx + 1] - sg);
+	      const db = Math.abs(pixels[idx + 2] - sb);
+	      const diff = (dr + dg + db) / 3;
+	      if (diff <= tolerance) {
+	        visited[ny * w + nx] = 1;
+	        stack.push([nx, ny]);
+	      }
+	    }
+	  }
+
+	  return { minX, maxX, minY, maxY, w: maxX - minX + 1, h: maxY - minY + 1 };
+	}
+
+	function startSmartErase(ev) {
+	  ev.preventDefault();
+	  const img = ev.currentTarget;
+	  const rect = img.getBoundingClientRect();
+	  const clickX = Math.round(((ev.clientX - rect.left) / rect.width) * img.naturalWidth);
+	  const clickY = Math.round(((ev.clientY - rect.top) / rect.height) * img.naturalHeight);
+
+	  if (clickX < 0 || clickX >= img.naturalWidth || clickY < 0 || clickY >= img.naturalHeight) return;
+
+	  const pixelData = getImagePixelData();
+	  if (!pixelData) return;
+
+	  const tolerance = getSensitivity();
+	  const region = floodFillRegion(pixelData, clickX, clickY, tolerance);
+
+	  const rgn = {
+	    x: region.minX / pixelData.w,
+	    y: region.minY / pixelData.h,
+	    w: region.w / pixelData.w,
+	    h: region.h / pixelData.h
+	  };
+
+	  if (smartPreviewEl) { smartPreviewEl.remove(); smartPreviewEl = null; }
+	  smartPreviewEl = document.createElement('div');
+	  smartPreviewEl.className = 'smart-preview';
+	  smartPreviewEl.style.left = (rgn.x * 100) + '%';
+	  smartPreviewEl.style.top = (rgn.y * 100) + '%';
+	  smartPreviewEl.style.width = (rgn.w * 100) + '%';
+	  smartPreviewEl.style.height = (rgn.h * 100) + '%';
+	  stage.appendChild(smartPreviewEl);
+
+	  if (smartPreviewEl._timer) clearTimeout(smartPreviewEl._timer);
+	  smartPreviewEl._timer = setTimeout(() => {
+	    applySmartErase(rgn);
+	  }, 600);
+
+	  smartPreviewEl._confirm = () => {
+	    if (smartPreviewEl && smartPreviewEl._timer) {
+	      clearTimeout(smartPreviewEl._timer);
+	      smartPreviewEl._timer = null;
+	    }
+	    applySmartErase(rgn);
+	  };
+	}
+
+	function applySmartErase(rgn) {
+	  if (smartPreviewEl) { smartPreviewEl.remove(); smartPreviewEl = null; }
+	  pushHistory();
+	  state.erasers.push({ x: rgn.x, y: rgn.y, w: rgn.w, h: rgn.h });
+	  render();
+	  save();
+	}
+
+	function onStageDown(ev) {
+	  if (smartEraseMode) {
+	    if (smartPreviewEl && smartPreviewEl._confirm) {
+	      smartPreviewEl._confirm();
+	    } else {
+	      startSmartErase(ev);
+	    }
+	    return;
+	  }
+	  if (eraseMode) { startErase(ev); }
+	}
+
 // ===== Таблица спецификации =====
 function renderTable() {
   tbody.innerHTML = '';
@@ -823,3 +962,4 @@ render();
 </script>
 </body>
 </html>
+
