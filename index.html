@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="ru">
 <head>
 <meta charset="UTF-8">
@@ -143,6 +143,7 @@
     <span id="smartSensVal" style="font-size:11px;">30</span>
   </label>
   <button id="markerModeBtn" onclick="toggleMarkerMode()">Режим: со сноской</button>
+  <button id="insertModeBtn" onclick="toggleInsertMode()">Вставка: выкл</button>
   <button id="rtBtn" onclick="setSpecialMode('rt')">РТ: выкл</button>
   <button id="rdBtn" onclick="setSpecialMode('rd')">РД: выкл</button>
   <button id="okBtn" onclick="setSpecialMode('ok')">ОК: выкл</button>
@@ -183,6 +184,7 @@
       Клик по элементу — ставит выноску (точка на элементе + число на полке рядом).
       Перетаскивай мышью число, чтобы отвести полку, или точку-якорь, чтобы уточнить место.
       Удаление строки автоматически перенумеровывает остальные.
+      «Вставка» — добавляет пропущенный номер и сдвигает дальше только номера той же чётности.
       «Ластик» — закрасить ненужный старый текст: включи режим и протяни прямоугольник по нему.
     </div>
     <table>
@@ -213,6 +215,7 @@ let smartEraseMode = false; // включён ли умный ластик
 let zoom = null;         // null = авто-подгонка по ширине при первой загрузке
 let markerMode = 'callout'; // 'callout' — со сноской, 'number' — только цифра
 let numberingMode = 'all'; // 'all' | 'odd' | 'even'
+let insertMode = false; // вставка пропущенного номера со сдвигом последующих номеров той же чётности
 let specialMode = null; // null | 'rt' | 'rd' | 'ok'
 let history = [];
 const MAX_HISTORY = 30;
@@ -282,7 +285,10 @@ function fitZoom() { setZoom(null); }
 function applyZoom() { setZoom(zoom); }
 
 function nextMarkerNumber() {
-  const nums = state.markers.map(m => m.num || 0).filter(n => n > 0);
+  const nums = state.markers
+    .filter(m => !m.kind)
+    .map(m => Number(m.num))
+    .filter(n => Number.isFinite(n) && n > 0);
   if (numberingMode === 'odd') {
     const oddNums = nums.filter(n => n % 2 === 1);
     return oddNums.length ? Math.max(...oddNums) + 2 : 1;
@@ -300,6 +306,56 @@ function cycleNumbering() {
   const btn = document.getElementById('numModeBtn');
   btn.textContent = NUM_MODE_LABELS[numberingMode];
   btn.classList.toggle('primary', numberingMode !== 'all');
+}
+
+function toggleInsertMode() {
+  insertMode = !insertMode;
+  const btn = document.getElementById('insertModeBtn');
+  btn.textContent = 'Вставка: ' + (insertMode ? 'вкл' : 'выкл');
+  btn.classList.toggle('primary', insertMode);
+}
+
+function askInsertNumber() {
+  const defaultNum = numberingMode === 'even' ? 2 : 1;
+  const raw = prompt('Какой номер вставить? Последующие номера той же чётности будут сдвинуты.', String(defaultNum));
+  if (raw === null) return null;
+  const num = parseInt(raw, 10);
+  if (!Number.isFinite(num) || num < 1) {
+    alert('Введите положительное целое число.');
+    return null;
+  }
+  if (numberingMode === 'odd' && num % 2 === 0) {
+    alert('Сейчас включена нечётная нумерация. Введите нечётный номер.');
+    return null;
+  }
+  if (numberingMode === 'even' && num % 2 !== 0) {
+    alert('Сейчас включена чётная нумерация. Введите чётный номер.');
+    return null;
+  }
+  return num;
+}
+
+function shiftNumbersForInsert(insertNum) {
+  state.markers.forEach(m => {
+    if (m.kind) return;
+    const n = Number(m.num);
+    if (Number.isFinite(n) && n >= insertNum && n % 2 === insertNum % 2) {
+      m.num = n + 2;
+    }
+  });
+}
+
+function sortedRegularMarkerEntries() {
+  return state.markers
+    .map((marker, index) => ({ marker, index }))
+    .filter(entry => !entry.marker.kind)
+    .sort((a, b) => {
+      const an = Number(a.marker.num);
+      const bn = Number(b.marker.num);
+      if (Number.isFinite(an) && Number.isFinite(bn) && an !== bn) return an - bn;
+      if (Number.isFinite(an) !== Number.isFinite(bn)) return Number.isFinite(an) ? -1 : 1;
+      return a.index - b.index;
+    });
 }
 
 const SPECIAL_PREFIX = { rt: 'РТ', rd: 'РД', ok: 'ОК' };
@@ -492,6 +548,11 @@ function onStageClick(ev) {
   const rect = ev.currentTarget.getBoundingClientRect();
   const x = (ev.clientX - rect.left) / rect.width;
   const y = (ev.clientY - rect.top) / rect.height;
+  let insertNum = null;
+  if (insertMode && !specialMode) {
+    insertNum = askInsertNumber();
+    if (insertNum == null) return;
+  }
   pushHistory();
   const isCallout = markerMode === 'callout';
   if (specialMode) {
@@ -504,13 +565,14 @@ function onStageClick(ev) {
       label: SPECIAL_PREFIX[specialMode] + nextSpecialNumber(specialMode)
     });
   } else {
+    if (insertNum != null) shiftNumbersForInsert(insertNum);
     state.markers.push({
       ax: x, ay: y,
       lx: isCallout ? clamp(x + 0.02, 0.02, 0.98) : x,
       ly: isCallout ? clamp(y - 0.03, 0.02, 0.98) : y,
       name: '', type: '', qty: 1,
       mode: markerMode,
-      num: nextMarkerNumber()
+      num: insertNum != null ? insertNum : nextMarkerNumber()
     });
   }
   selected = state.markers.length - 1;
@@ -745,8 +807,7 @@ function onEraseEnd(ev) {
 // ===== Таблица спецификации =====
 function renderTable() {
   tbody.innerHTML = '';
-  state.markers.forEach((m, i) => {
-    if (m.kind) return;
+  sortedRegularMarkerEntries().forEach(({ marker: m, index: i }) => {
     const tr = document.createElement('tr');
     if (i === selected) tr.className = 'selected';
     tr.onclick = () => { selected = i; render(); };
@@ -883,8 +944,7 @@ function exportImage() {
 function exportCsv() {
   if (!state.markers.length) { alert('Нет ни одной позиции.'); return; }
   let rows = [['№ поз.', 'Наименование', 'Тип / марка', 'Кол-во']];
-  state.markers.forEach(m => {
-    if (m.kind) return;
+  sortedRegularMarkerEntries().forEach(({ marker: m }) => {
     rows.push([String(m.num), m.name || '', m.type || '', String(m.qty != null ? m.qty : '')]);
   });
   const csv = rows.map(r => r.map(csvCell).join(';')).join('\r\n');
@@ -962,4 +1022,3 @@ render();
 </script>
 </body>
 </html>
-
